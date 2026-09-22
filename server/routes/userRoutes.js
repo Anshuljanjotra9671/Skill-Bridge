@@ -1,0 +1,1 @@
+import { Router } from 'express';import { protect } from '../middleware/auth.js';import { discover,getUser,updateProfile } from '../controllers/userController.js';const router=Router();router.get('/discover',protect,discover);router.put('/profile',protect,updateProfile);router.get('/:id',protect,getUser);export default router;

@@ -1,0 +1,1 @@
+import { Router } from 'express';import { protect } from '../middleware/auth.js';import { createSession,listSessions } from '../controllers/sessionController.js';const router=Router();router.use(protect);router.route('/').get(listSessions).post(createSession);export default router;

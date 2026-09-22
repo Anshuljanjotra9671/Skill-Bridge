@@ -1,0 +1,3 @@
+import mongoose from 'mongoose';
+const sessionSchema = new mongoose.Schema({ exchangeRequest: { type: mongoose.Schema.Types.ObjectId, ref: 'ExchangeRequest', required: true }, teacher: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, learner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, skill: String, scheduledAt: { type: Date, required: true }, duration: { type: Number, default: 60 }, meetingLink: String, status: { type: String, enum: ['scheduled', 'completed', 'cancelled'], default: 'scheduled' } }, { timestamps: true });
+export default mongoose.model('Session', sessionSchema);

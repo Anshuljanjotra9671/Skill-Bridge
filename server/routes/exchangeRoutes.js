@@ -1,0 +1,1 @@
+import { Router } from 'express';import { protect } from '../middleware/auth.js';import { createExchange,listExchanges,updateStatus } from '../controllers/exchangeController.js';const router=Router();router.use(protect);router.route('/').get(listExchanges).post(createExchange);router.patch('/:id',updateStatus);export default router;
