@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: skillbridge-client
+  namespace: skillbridge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: skillbridge-client
+  template:
+    metadata:
+      labels:
+        app: skillbridge-client
+    spec:
+      containers:
+        - name: client
+          image: 411072614015.dkr.ecr.eu-north-1.amazonaws.com/skillbridge-client:4fec772e5711
+          ports:
+            - containerPort: 80

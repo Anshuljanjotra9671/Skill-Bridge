@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: skillbridge-api
+  namespace: skillbridge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: skillbridge-api
+  template:
+    metadata:
+      labels:
+        app: skillbridge-api
+    spec:
+      containers:
+        - name: api
+          image: 411072614015.dkr.ecr.eu-north-1.amazonaws.com/skillbridge-api:4fec772e5711
+          ports:
+            - containerPort: 5000
+          env:
+            - name: PORT
+              value: "5000"
+
+            - name: MONGO_URI
+              value: "mongodb://mongo:27017/skillbridge"
+
+            - name: JWT_SECRET
+              value: "CHANGE_THIS_LATER"
+
+            - name: CLIENT_URL
+              value: "http://localhost:8080"
