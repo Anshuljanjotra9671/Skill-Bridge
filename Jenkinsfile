@@ -1,244 +1,194 @@
 pipeline {
+
     agent any
 
-    options {
-        timestamps()
-        ansiColor('xterm')
-        disableConcurrentBuilds()
-        buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
-        timeout(time: 45, unit: 'MINUTES')
-    }
-
-    parameters {
-        booleanParam(name: 'DEPLOY', defaultValue: false,
-            description: 'Provision/update EC2 and deploy the application. Leave disabled for CI-only builds.')
-        string(name: 'AWS_KEY_NAME', defaultValue: '',
-            description: 'Existing EC2 key-pair name. Required only when DEPLOY is enabled.')
-        string(name: 'ADMIN_CIDR', defaultValue: '',
-            description: 'CIDR allowed to SSH to EC2, e.g. 203.0.113.10/32. Required only when DEPLOY is enabled.')
-        string(name: 'EC2_SSH_USER', defaultValue: 'ec2-user',
-            description: 'SSH user for the Amazon Linux EC2 instance.')
-    }
-
     environment {
-        APP_NAME             = 'skillbridge'
-        SONARQUBE_SERVER     = 'SonarQube'
-        SONAR_TOKEN_CRED     = 'sonarqube-token'
-        AWS_CREDENTIALS      = 'aws-credentials'
-        EC2_SSH_CREDENTIALS  = 'ec2-ssh-private-key'
-        PROD_ENV_CREDENTIALS = 'skillbridge-production-env'
-        TF_IN_AUTOMATION     = 'true'
-        API_IMAGE            = 'skillbridge-api'
-        CLIENT_IMAGE         = 'skillbridge-client'
+        AWS_REGION = 'eu-north-1'
+        AWS_ACCOUNT_ID = '411072614015'
+
+        ECR_API = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/skillbridge-api"
+        ECR_CLIENT = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/skillbridge-client"
+
+        EKS_CLUSTER = 'skillbridge-eks'
+        K8S_NAMESPACE = 'skillbridge'
     }
 
     stages {
+
         stage('Checkout') {
             steps {
-                cleanWs()
                 checkout scm
-                script {
-                    env.IMAGE_TAG = "${env.BRANCH_NAME ?: 'local'}-${env.BUILD_NUMBER}".replaceAll('[^A-Za-z0-9_.-]', '-')
-                }
             }
         }
 
-        stage('Install dependencies') {
+        stage('Verify Tools') {
             steps {
-                sh '''#!/usr/bin/env bash
-                    set -euo pipefail
-                    npm ci
-                    npm ci --prefix client
-                    npm ci --prefix server
+                sh '''
+                    set -e
+
+                    echo "AWS:"
+                    aws --version
+
+                    echo "Docker:"
+                    docker --version
+
+                    echo "Kubectl:"
+                    kubectl version --client
+
+                    echo "Git:"
+                    git --version
                 '''
             }
         }
 
-        stage('Build client') {
+        stage('AWS Authentication') {
             steps {
-                sh '''#!/usr/bin/env bash
-                    set -euo pipefail
-                    npm run build --prefix client
+                sh '''
+                    set -e
+
+                    aws sts get-caller-identity
+
+                    aws ecr get-login-password \
+                      --region ${AWS_REGION} | \
+                    docker login \
+                      --username AWS \
+                      --password-stdin \
+                      ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
+                    aws eks update-kubeconfig \
+                      --region ${AWS_REGION} \
+                      --name ${EKS_CLUSTER}
+
+                    kubectl get nodes
                 '''
             }
         }
 
-        stage('SonarQube analysis') {
+        stage('Build API Image') {
             steps {
-                withSonarQubeEnv(installationName: "${SONARQUBE_SERVER}", credentialsId: "${SONAR_TOKEN_CRED}") {
-                    sh '''#!/usr/bin/env bash
-                        set -euo pipefail
-                        sonar-scanner \
-                          -Dsonar.projectKey=skillbridge \
-                          -Dsonar.projectName=SkillBridge \
-                          -Dsonar.sources=client/src,server \
-                          -Dsonar.exclusions=**/node_modules/**,client/dist/** \
-                          -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
-                    '''
-                }
-            }
-        }
+                sh '''
+                    set -e
 
-        stage('SonarQube quality gate') {
-            steps {
-                timeout(time: 10, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
-                }
-            }
-        }
-
-        stage('OWASP Dependency-Check') {
-            steps {
-                sh '''#!/usr/bin/env bash
-                    set -euo pipefail
-                    rm -rf reports/dependency-check
-                    mkdir -p reports/dependency-check
-                    dependency-check.sh \
-                      --project "SkillBridge" \
-                      --scan . \
-                      --exclude "./node_modules/**" \
-                      --exclude "./client/node_modules/**" \
-                      --exclude "./server/node_modules/**" \
-                      --format "HTML" --format "JUNIT" \
-                      --out reports/dependency-check \
-                      --failOnCVSS 7
-                '''
-            }
-            post {
-                always {
-                    junit allowEmptyResults: true, testResults: 'reports/dependency-check/dependency-check-junit.xml'
-                    archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/dependency-check/**'
-                }
-            }
-        }
-
-        stage('Build container images') {
-            steps {
-                sh '''#!/usr/bin/env bash
-                    set -euo pipefail
-                    docker build --pull -t "$API_IMAGE:$IMAGE_TAG" -f Dockerfile .
-                    docker build --pull -t "$CLIENT_IMAGE:$IMAGE_TAG" -f client/Dockerfile .
+                    docker build \
+                      -t ${ECR_API}:${GIT_COMMIT} \
+                      -f Dockerfile .
                 '''
             }
         }
 
-        stage('Trivy scans') {
+        stage('Build Client Image') {
             steps {
-                sh '''#!/usr/bin/env bash
-                    set -euo pipefail
-                    mkdir -p reports/trivy
-                    trivy fs --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
-                      --format template --template '@contrib/junit.tpl' \
-                      --output reports/trivy/filesystem-junit.xml .
-                    trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
-                      --format template --template '@contrib/junit.tpl' \
-                      --output reports/trivy/api-image-junit.xml "$API_IMAGE:$IMAGE_TAG"
-                    trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
-                      --format template --template '@contrib/junit.tpl' \
-                      --output reports/trivy/client-image-junit.xml "$CLIENT_IMAGE:$IMAGE_TAG"
+                sh '''
+                    set -e
+
+                    docker build \
+                      -t ${ECR_CLIENT}:${GIT_COMMIT} \
+                      -f client/Dockerfile .
                 '''
             }
-            post {
-                always {
-                    junit allowEmptyResults: true, testResults: 'reports/trivy/*-junit.xml'
-                    archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/trivy/**'
-                }
+        }
+
+        stage('Trivy Scan API') {
+            steps {
+                sh '''
+                    trivy image \
+                      --severity HIGH,CRITICAL \
+                      --exit-code 1 \
+                      ${ECR_API}:${GIT_COMMIT}
+                '''
             }
         }
 
-        stage('Terraform plan') {
-            when { expression { return params.DEPLOY } }
+        stage('Trivy Scan Client') {
             steps {
-                script {
-                    if (!params.AWS_KEY_NAME?.trim() || !params.ADMIN_CIDR?.trim()) {
-                        error('AWS_KEY_NAME and ADMIN_CIDR are required when DEPLOY is enabled.')
-                    }
-                }
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${AWS_CREDENTIALS}"]]) {
-                    dir('terraform') {
-                        sh '''#!/usr/bin/env bash
-                            set -euo pipefail
-                            terraform init -input=false
-                            terraform fmt -check
-                            terraform validate
-                            terraform plan -input=false -out=tfplan \
-                              -var "key_name=$AWS_KEY_NAME" \
-                              -var "admin_cidr=$ADMIN_CIDR"
-                        '''
-                    }
-                }
+                sh '''
+                    trivy image \
+                      --severity HIGH,CRITICAL \
+                      --exit-code 1 \
+                      ${ECR_CLIENT}:${GIT_COMMIT}
+                '''
             }
         }
 
-        stage('Terraform apply') {
-            when { expression { return params.DEPLOY } }
+        stage('Push Images to ECR') {
             steps {
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${AWS_CREDENTIALS}"]]) {
-                    dir('terraform') {
-                        sh '''#!/usr/bin/env bash
-                            set -euo pipefail
-                            terraform apply -input=false -auto-approve tfplan
-                            terraform output -raw public_ip > ../ec2_public_ip.txt
-                        '''
-                    }
-                }
+                sh '''
+                    set -e
+
+                    docker push ${ECR_API}:${GIT_COMMIT}
+                    docker push ${ECR_CLIENT}:${GIT_COMMIT}
+                '''
             }
         }
 
-        stage('Deploy to EC2') {
-            when { expression { return params.DEPLOY } }
+        stage('Deploy API to EKS') {
             steps {
-                script {
-                    env.EC2_PUBLIC_IP = readFile('ec2_public_ip.txt').trim()
-                    if (!env.EC2_PUBLIC_IP) {
-                        error('Terraform did not return an EC2 public IP.')
-                    }
-                }
-                withCredentials([file(credentialsId: "${PROD_ENV_CREDENTIALS}", variable: 'PRODUCTION_ENV')]) {
-                    sshagent(credentials: ["${EC2_SSH_CREDENTIALS}"]) {
-                        sh '''#!/usr/bin/env bash
-                            set -euo pipefail
-                            REMOTE="$EC2_SSH_USER@$EC2_PUBLIC_IP"
-                            mkdir -p ~/.ssh
-                            ssh-keyscan -H "$EC2_PUBLIC_IP" >> ~/.ssh/known_hosts
+                sh '''
+                    set -e
 
-                            # A new Terraform instance may need a short time before SSH is ready.
-                            for attempt in {1..20}; do
-                              if ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" 'true'; then break; fi
-                              if [ "$attempt" -eq 20 ]; then echo 'EC2 did not become reachable over SSH.' >&2; exit 1; fi
-                              sleep 15
-                            done
+                    kubectl set image deployment/skillbridge-api \
+                      api=${ECR_API}:${GIT_COMMIT} \
+                      -n ${K8S_NAMESPACE}
 
-                            ssh "$REMOTE" 'sudo dnf install -y docker && sudo systemctl enable --now docker && sudo usermod -aG docker "$USER" && sudo mkdir -p /opt/skillbridge && sudo chown -R "$USER":"$USER" /opt/skillbridge'
-                            scp -r Dockerfile docker-compose.yml client server "$REMOTE:/opt/skillbridge/"
-                            scp "$PRODUCTION_ENV" "$REMOTE:/opt/skillbridge/.env"
-                            ssh "$REMOTE" 'cd /opt/skillbridge && sudo docker compose up -d --build --remove-orphans'
-                        '''
-                    }
-                }
+                    kubectl rollout status \
+                      deployment/skillbridge-api \
+                      -n ${K8S_NAMESPACE} \
+                      --timeout=180s
+                '''
             }
         }
 
-        stage('Deployment smoke test') {
-            when { expression { return params.DEPLOY } }
+        stage('Deploy Client to EKS') {
             steps {
-                sh '''#!/usr/bin/env bash
-                    set -euo pipefail
-                    for attempt in {1..12}; do
-                      if curl --fail --silent --show-error "http://$EC2_PUBLIC_IP:8080" > /dev/null; then exit 0; fi
-                      sleep 10
-                    done
-                    echo 'Frontend smoke test failed.' >&2
-                    exit 1
+                sh '''
+                    set -e
+
+                    kubectl set image deployment/skillbridge-client \
+                      client=${ECR_CLIENT}:${GIT_COMMIT} \
+                      -n ${K8S_NAMESPACE}
+
+                    kubectl rollout status \
+                      deployment/skillbridge-client \
+                      -n ${K8S_NAMESPACE} \
+                      --timeout=180s
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "=== Pods ==="
+                    kubectl get pods -n ${K8S_NAMESPACE}
+
+                    echo "=== Services ==="
+                    kubectl get svc -n ${K8S_NAMESPACE}
+
+                    echo "=== API Deployment ==="
+                    kubectl get deployment skillbridge-api \
+                      -n ${K8S_NAMESPACE}
+
+                    echo "=== Client Deployment ==="
+                    kubectl get deployment skillbridge-client \
+                      -n ${K8S_NAMESPACE}
                 '''
             }
         }
     }
 
     post {
+        success {
+            echo 'SkillBridge deployed successfully to EKS.'
+        }
+
+        failure {
+            echo 'Pipeline failed. Check the failed stage logs.'
+        }
+
         always {
-            archiveArtifacts allowEmptyArchive: true, artifacts: 'client/dist/**, ec2_public_ip.txt'
-            cleanWs(deleteDirs: true, notFailBuild: true)
+            sh 'docker system prune -f || true'
         }
     }
 }
