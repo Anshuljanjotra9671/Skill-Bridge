@@ -3,30 +3,53 @@ kind: Deployment
 metadata:
   name: skillbridge-api
   namespace: skillbridge
+
 spec:
   replicas: 1
+
   selector:
     matchLabels:
       app: skillbridge-api
+
   template:
     metadata:
       labels:
         app: skillbridge-api
+
     spec:
       containers:
         - name: api
           image: 411072614015.dkr.ecr.eu-north-1.amazonaws.com/skillbridge-api:4fec772e5711
+
           ports:
             - containerPort: 5000
+
           env:
+            # These MUST come before MONGO_URI
+            - name: MONGO_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: skillbridge-api-secrets
+                  key: MONGO_USERNAME
+
+            - name: MONGO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: skillbridge-api-secrets
+                  key: MONGO_PASSWORD
+
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: skillbridge-api-secrets
+                  key: JWT_SECRET
+
             - name: PORT
               value: "5000"
 
             - name: MONGO_URI
-              value: "mongodb://mongo:27017/skillbridge"
-
-            - name: JWT_SECRET
-              value: "CHANGE_THIS_LATER"
+              value: "mongodb://$(MONGO_USERNAME):$(MONGO_PASSWORD)@mongo:27017/skillbridge?authSource=admin"
 
             - name: CLIENT_URL
               value: "http://localhost:8080"
+

@@ -20,6 +20,7 @@ metadata:
 spec:
   serviceName: mongo
   replicas: 1
+
   selector:
     matchLabels:
       app: mongo
@@ -33,8 +34,25 @@ spec:
       containers:
         - name: mongo
           image: mongo:7
+
+          args:
+            - "--auth"
+
           ports:
             - containerPort: 27017
+
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-auth
+                  key: username
+
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-auth
+                  key: password
 
           volumeMounts:
             - name: mongo-data
@@ -44,6 +62,7 @@ spec:
             exec:
               command:
                 - mongosh
+                - --quiet
                 - --eval
                 - "db.adminCommand('ping')"
             initialDelaySeconds: 10
@@ -55,6 +74,7 @@ spec:
             exec:
               command:
                 - mongosh
+                - --quiet
                 - --eval
                 - "db.adminCommand('ping')"
             initialDelaySeconds: 30
